@@ -99,28 +99,31 @@ struct NetworkArchitecture {
             && fc_2.write_parameters(stream);
     }
 
-    std::int32_t propagate(const TransformedFeatureType* transformedFeatures) const {
-        struct alignas(CacheLineSize) Buffer {
-            alignas(CacheLineSize) typename decltype(fc_0)::OutputBuffer fc_0_out;
-            alignas(CacheLineSize) typename decltype(ac_sqr_0)::OutputType
-              ac_sqr_0_out[ceil_to_multiple<IndexType>(FC_0_OUTPUTS * 2, 32)];
-            alignas(CacheLineSize) typename decltype(ac_0)::OutputBuffer ac_0_out;
-            alignas(CacheLineSize) typename decltype(fc_1)::OutputBuffer fc_1_out;
-            alignas(CacheLineSize) typename decltype(ac_1)::OutputBuffer ac_1_out;
-            alignas(CacheLineSize) typename decltype(fc_2)::OutputBuffer fc_2_out;
+    // Shared buffer type
+    struct alignas(CacheLineSize) Buffer {
+        alignas(CacheLineSize) typename decltype(fc_0)::OutputBuffer fc_0_out;
+        alignas(CacheLineSize) typename decltype(ac_sqr_0)::OutputType
+          ac_sqr_0_out[ceil_to_multiple<IndexType>(FC_0_OUTPUTS * 2, 32)];
+        alignas(CacheLineSize) typename decltype(ac_0)::OutputBuffer ac_0_out;
+        alignas(CacheLineSize) typename decltype(fc_1)::OutputBuffer fc_1_out;
+        alignas(CacheLineSize) typename decltype(ac_1)::OutputBuffer ac_1_out;
+        alignas(CacheLineSize) typename decltype(fc_2)::OutputBuffer fc_2_out;
 
-            Buffer() { std::memset(this, 0, sizeof(*this)); }
-        };
+        Buffer() { std::memset(this, 0, sizeof(*this)); }
+    };
 
+    static Buffer& get_buffer() {
 #if defined(__clang__) && (__APPLE__)
-        // workaround for a bug reported with xcode 12
         static thread_local auto tlsBuffer = std::make_unique<Buffer>();
-        // Access TLS only once, cache result.
-        Buffer& buffer = *tlsBuffer;
+        return *tlsBuffer;
 #else
         alignas(CacheLineSize) static thread_local Buffer buffer;
+        return buffer;
 #endif
+    }
 
+    std::int32_t run_propagate(const TransformedFeatureType* transformedFeatures,
+                               Buffer&                       buffer) const {
         fc_0.propagate(transformedFeatures, buffer.fc_0_out);
         ac_sqr_0.propagate(buffer.fc_0_out, buffer.ac_sqr_0_out);
         ac_0.propagate(buffer.fc_0_out, buffer.ac_0_out);
@@ -130,13 +133,23 @@ struct NetworkArchitecture {
         ac_1.propagate(buffer.fc_1_out, buffer.ac_1_out);
         fc_2.propagate(buffer.ac_1_out, buffer.fc_2_out);
 
-        // buffer.fc_0_out[FC_0_OUTPUTS] is such that 1.0 is equal to 127*(1<<WeightScaleBits) in
-        // quantized form, but we want 1.0 to be equal to 600*OutputScale
         std::int32_t fwdOut =
           (buffer.fc_0_out[FC_0_OUTPUTS]) * (600 * OutputScale) / (127 * (1 << WeightScaleBits));
-        std::int32_t outputValue = buffer.fc_2_out[0] + fwdOut;
+        return buffer.fc_2_out[0] + fwdOut;
+    }
 
-        return outputValue;
+    std::int32_t propagate(const TransformedFeatureType* transformedFeatures) const {
+        return run_propagate(transformedFeatures, get_buffer());
+    }
+
+    // Propagate and also copy out the penultimate hidden activations (ac_1_out).
+    // hiddenOut must point to at least FC_1_OUTPUTS bytes.
+    std::int32_t propagate_with_hidden(const TransformedFeatureType* transformedFeatures,
+                                       std::uint8_t*                 hiddenOut) const {
+        Buffer& buffer = get_buffer();
+        auto    output = run_propagate(transformedFeatures, buffer);
+        std::memcpy(hiddenOut, buffer.ac_1_out, FC_1_OUTPUTS * sizeof(std::uint8_t));
+        return output;
     }
 
     std::size_t get_content_hash() const {

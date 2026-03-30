@@ -60,15 +60,20 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
     assert(!pos.checkers());
 
     bool smallNet           = use_smallnet(pos);
+    int  networkUncertainty = 0;
     auto [psqt, positional] = smallNet ? networks.small.evaluate(pos, accumulators, caches.small)
-                                       : networks.big.evaluate(pos, accumulators, caches.big);
+                                       : networks.big.evaluate(pos, accumulators, caches.big,
+                                                               uncertainty ? &networkUncertainty
+                                                                           : nullptr);
 
     Value nnue = (125 * psqt + 131 * positional) / 128;
 
     // Re-evaluate the position when higher eval accuracy is worth the time spent
     if (smallNet && (std::abs(nnue) < 277))
     {
-        std::tie(psqt, positional) = networks.big.evaluate(pos, accumulators, caches.big);
+        std::tie(psqt, positional) = networks.big.evaluate(pos, accumulators, caches.big,
+                                                           uncertainty ? &networkUncertainty
+                                                                       : nullptr);
         nnue                       = (125 * psqt + 131 * positional) / 128;
         smallNet                   = false;
     }
@@ -76,9 +81,9 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
     // Blend optimism and eval with nnue complexity
     int nnueComplexity = std::abs(psqt - positional);
 
-    // Output NNUE complexity as an uncertainty proxy if requested
+    // Output uncertainty: use trained head if available, else fall back to nnueComplexity
     if (uncertainty)
-        *uncertainty = nnueComplexity;
+        *uncertainty = (networkUncertainty > 0) ? networkUncertainty : nnueComplexity;
 
     optimism += optimism * nnueComplexity / 476;
     nnue -= nnue * nnueComplexity / 18236;

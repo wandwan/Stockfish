@@ -19,6 +19,7 @@
 #ifndef NETWORK_H_INCLUDED
 #define NETWORK_H_INCLUDED
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -50,6 +51,25 @@ enum class EmbeddedNNUEType {
 
 using NetworkOutput = std::tuple<Value, Value>;
 
+// Uncertainty head: a simple per-bucket FC layer (33->1) loaded from a .uhead sidecar file.
+// Input: 32 hidden activations (uint8) from ac_1 + 1 eval scalar (quantized).
+struct UncertaintyHead {
+    static constexpr std::uint32_t MAGIC        = 0x55484431u;  // "UHD1"
+    static constexpr int           INPUT_DIM    = 33;           // L3 (32) + eval (1)
+    static constexpr int           PADDED_INPUT = 64;           // padded to multiple of 32
+
+    struct BucketWeights {
+        std::int32_t bias;
+        std::int8_t  weights[PADDED_INPUT];
+    };
+
+    std::array<BucketWeights, LayerStacks> buckets{};
+    bool loaded = false;
+
+    bool         read_parameters(std::istream& stream);
+    std::int32_t evaluate(int bucket, const std::uint8_t* hidden, std::int32_t evalOutput) const;
+};
+
 // The network must be a trivial type, i.e. the memory must be in-line.
 // This is required to allow sharing the network via shared memory, as
 // there is no way to run destructors.
@@ -77,6 +97,15 @@ class Network {
                            AccumulatorStack&                       accumulatorStack,
                            AccumulatorCaches::Cache<FTDimensions>& cache) const;
 
+    // Evaluate and also compute uncertainty from the uncertainty head (if loaded).
+    NetworkOutput evaluate(const Position&                         pos,
+                           AccumulatorStack&                       accumulatorStack,
+                           AccumulatorCaches::Cache<FTDimensions>& cache,
+                           int*                                    uncertaintyOut) const;
+
+    void load_uncertainty_head(const std::string& path);
+    bool has_uncertainty_head() const { return uncertaintyHead.loaded; }
+
 
     void verify(std::string evalfilePath, const std::function<void(std::string_view)>&) const;
     NnueEvalTrace trace_evaluate(const Position&                         pos,
@@ -103,6 +132,9 @@ class Network {
 
     // Evaluation function
     Arch network[LayerStacks];
+
+    // Uncertainty head (loaded from .uhead sidecar, optional)
+    UncertaintyHead uncertaintyHead;
 
     EvalFile         evalFile;
     EmbeddedNNUEType embeddedType;

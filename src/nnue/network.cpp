@@ -18,6 +18,8 @@
 
 #include "network.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -186,6 +188,102 @@ Network<Arch, Transformer>::evaluate(const Position&                         pos
       featureTransformer.transform(pos, accumulatorStack, cache, transformedFeatures, bucket);
     const auto positional = network[bucket].propagate(transformedFeatures);
     return {static_cast<Value>(psqt / OutputScale), static_cast<Value>(positional / OutputScale)};
+}
+
+
+template<typename Arch, typename Transformer>
+NetworkOutput
+Network<Arch, Transformer>::evaluate(const Position&                         pos,
+                                     AccumulatorStack&                       accumulatorStack,
+                                     AccumulatorCaches::Cache<FTDimensions>& cache,
+                                     int*                                    uncertaintyOut) const {
+
+    constexpr uint64_t alignment = CacheLineSize;
+
+    alignas(alignment)
+      TransformedFeatureType transformedFeatures[FeatureTransformer<FTDimensions>::BufferSize];
+
+    ASSERT_ALIGNED(transformedFeatures, alignment);
+
+    const int  bucket = (pos.count<ALL_PIECES>() - 1) / 4;
+    const auto psqt =
+      featureTransformer.transform(pos, accumulatorStack, cache, transformedFeatures, bucket);
+
+    if (uncertaintyOut && uncertaintyHead.loaded)
+    {
+        alignas(CacheLineSize) std::uint8_t hidden[Arch::FC_1_OUTPUTS];
+        const auto positional =
+          network[bucket].propagate_with_hidden(transformedFeatures, hidden);
+        *uncertaintyOut = uncertaintyHead.evaluate(bucket, hidden, positional);
+        return {static_cast<Value>(psqt / OutputScale),
+                static_cast<Value>(positional / OutputScale)};
+    }
+
+    const auto positional = network[bucket].propagate(transformedFeatures);
+    if (uncertaintyOut)
+        *uncertaintyOut = 0;
+    return {static_cast<Value>(psqt / OutputScale), static_cast<Value>(positional / OutputScale)};
+}
+
+
+template<typename Arch, typename Transformer>
+void Network<Arch, Transformer>::load_uncertainty_head(const std::string& path) {
+    std::ifstream stream(path, std::ios_base::binary);
+    if (!stream)
+    {
+        sync_cout << "info string Uncertainty head file not found: " << path << sync_endl;
+        return;
+    }
+
+    if (uncertaintyHead.read_parameters(stream))
+        sync_cout << "info string Uncertainty head loaded from " << path << sync_endl;
+    else
+        sync_cout << "info string Failed to load uncertainty head from " << path << sync_endl;
+}
+
+
+// UncertaintyHead implementation
+bool UncertaintyHead::read_parameters(std::istream& stream) {
+    auto magic = read_little_endian<std::uint32_t>(stream);
+    if (magic != MAGIC)
+        return false;
+
+    // Skip SHA-256 hash (32 bytes)
+    stream.seekg(32, std::ios_base::cur);
+
+    auto numBuckets = read_little_endian<std::uint32_t>(stream);
+    auto inputDim   = read_little_endian<std::uint32_t>(stream);
+
+    if (numBuckets != LayerStacks || inputDim != INPUT_DIM)
+        return false;
+
+    for (std::size_t i = 0; i < LayerStacks; ++i)
+    {
+        buckets[i].bias = read_little_endian<std::int32_t>(stream);
+        stream.read(reinterpret_cast<char*>(buckets[i].weights), PADDED_INPUT);
+    }
+
+    loaded = stream.good();
+    return loaded;
+}
+
+std::int32_t UncertaintyHead::evaluate(int                  bucket,
+                                       const std::uint8_t*  hidden,
+                                       std::int32_t         evalOutput) const {
+    const auto&  bw  = buckets[bucket];
+    std::int32_t sum = bw.bias;
+
+    // Dot product: hidden[0..31] * weights[0..31]
+    for (int i = 0; i < 32; ++i)
+        sum += static_cast<std::int32_t>(hidden[i]) * static_cast<std::int32_t>(bw.weights[i]);
+
+    // 33rd input: eval scalar, clamped to uint8 range
+    std::int32_t evalInput =
+      static_cast<std::int32_t>(std::min(std::abs(evalOutput), 127 * OutputScale) / OutputScale);
+    sum += evalInput * static_cast<std::int32_t>(bw.weights[32]);
+
+    // Output in quantized units; divide out weight scale, clamp non-negative
+    return std::max(sum / (1 << WeightScaleBits), 0);
 }
 
 
