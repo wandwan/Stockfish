@@ -328,6 +328,7 @@ class Worker {
     TimePoint elapsed_time() const;
 
     Value evaluate(const Position&);
+    Value evaluate(const Position&, int& uncertainty);
 
     LimitsType limits;
 

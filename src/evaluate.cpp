@@ -54,7 +54,8 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
                      const Position&                pos,
                      Eval::NNUE::AccumulatorStack&  accumulators,
                      Eval::NNUE::AccumulatorCaches& caches,
-                     int                            optimism) {
+                     int                            optimism,
+                     int*                           uncertainty) {
 
     assert(!pos.checkers());
 
@@ -74,6 +75,11 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
 
     // Blend optimism and eval with nnue complexity
     int nnueComplexity = std::abs(psqt - positional);
+
+    // Output NNUE complexity as an uncertainty proxy if requested
+    if (uncertainty)
+        *uncertainty = nnueComplexity;
+
     optimism += optimism * nnueComplexity / 476;
     nnue -= nnue * nnueComplexity / 18236;
 

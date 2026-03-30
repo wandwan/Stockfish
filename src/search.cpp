@@ -665,6 +665,7 @@ Value Search::Worker::search(
     bool  givesCheck, improving, priorCapture, opponentWorsening;
     bool  capture, ttCapture;
     int   priorReduction;
+    int   nnueUncertainty = 0;
     Piece movedPiece;
 
     SearchedList capturesSearched;
@@ -742,7 +743,7 @@ Value Search::Worker::search(
         // Never assume anything about values stored in TT
         unadjustedStaticEval = ttData.eval;
         if (!is_valid(unadjustedStaticEval))
-            unadjustedStaticEval = evaluate(pos);
+            unadjustedStaticEval = evaluate(pos, nnueUncertainty);
 
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
@@ -753,7 +754,7 @@ Value Search::Worker::search(
     }
     else
     {
-        unadjustedStaticEval = evaluate(pos);
+        unadjustedStaticEval = evaluate(pos, nnueUncertainty);
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
         // Static evaluation is saved as it was before adjustment by correction history
@@ -901,7 +902,8 @@ Value Search::Worker::search(
 
             return futilityMult * d
                  - (2686 * improving + 362 * opponentWorsening) * futilityMult / 1024  //
-                 + std::abs(correctionValue) / 180600;
+                 + std::abs(correctionValue) / 180600
+                 + nnueUncertainty / 4;
         };
 
         if (!ss->ttPv && depth < 15 && eval - futility_margin(depth) >= beta && eval >= beta
@@ -1086,7 +1088,8 @@ moves_loop:  // When in check, search starts here
                 if (!givesCheck && lmrDepth < 7)
                 {
                     Value futilityValue = ss->staticEval + 218 + 223 * lmrDepth
-                                        + PieceValue[capturedPiece] + 131 * captHist / 1024;
+                                        + PieceValue[capturedPiece] + 131 * captHist / 1024
+                                        + nnueUncertainty / 4;
 
                     if (futilityValue <= alpha)
                         continue;
@@ -1115,7 +1118,8 @@ moves_loop:  // When in check, search starts here
                 lmrDepth += history / 2995;
 
                 Value futilityValue = ss->staticEval + 42 + 151 * !bestMove + 120 * lmrDepth
-                                    + 86 * (ss->staticEval > alpha);
+                                    + 86 * (ss->staticEval > alpha)
+                                    + nnueUncertainty / 4;
 
                 // Futility pruning: parent node
                 // (*Scaler): Generally, more frequent futility pruning
@@ -1775,6 +1779,11 @@ TimePoint Search::Worker::elapsed_time() const { return main_manager()->tm.elaps
 Value Search::Worker::evaluate(const Position& pos) {
     return Eval::evaluate(networks[numaAccessToken], pos, accumulatorStack, refreshTable,
                           optimism[pos.side_to_move()]);
+}
+
+Value Search::Worker::evaluate(const Position& pos, int& uncertainty) {
+    return Eval::evaluate(networks[numaAccessToken], pos, accumulatorStack, refreshTable,
+                          optimism[pos.side_to_move()], &uncertainty);
 }
 
 namespace {
